@@ -106,43 +106,165 @@ async function login() {
   console.log('🔐 Logging into TradingView...');
   
   try {
-    // Go to TradingView
-    await page.goto('https://www.tradingview.com/', { waitUntil: 'networkidle2' });
+    // Go directly to TradingView sign in page
+    await page.goto('https://www.tradingview.com/accounts/signin/', { waitUntil: 'networkidle2' });
     await delay(CONFIG.DELAY);
     
-    // Click sign in button
-    const signInBtn = await page.$('button[data-name="header-user-menu-sign-in"]');
-    if (signInBtn) {
-      await signInBtn.click();
-      await delay(CONFIG.DELAY);
+    // Take screenshot for debugging
+    console.log('📸 On signin page...');
+    
+    // Try multiple selectors for the email/username field
+    const usernameSelectors = [
+      'input[name="username"]',
+      'input[name="id_username"]',
+      'input[type="email"]',
+      'input[placeholder*="Email"]',
+      'input[placeholder*="email"]',
+      'input[autocomplete="username"]',
+      '#id_username',
+      '.tv-control-material-input__control[name="username"]'
+    ];
+    
+    let usernameInput = null;
+    for (const selector of usernameSelectors) {
+      usernameInput = await page.$(selector);
+      if (usernameInput) {
+        console.log(`Found username field with selector: ${selector}`);
+        break;
+      }
     }
     
-    // Click "Email" option
-    const emailBtn = await page.$('button[name="Email"]');
-    if (emailBtn) {
-      await emailBtn.click();
-      await delay(CONFIG.DELAY);
+    if (!usernameInput) {
+      // Try clicking "Email" button first if it exists
+      const emailBtns = [
+        'button[name="Email"]',
+        'button:has-text("Email")',
+        'span:has-text("Email")',
+        '[data-name="email"]'
+      ];
+      
+      for (const btnSelector of emailBtns) {
+        try {
+          const btn = await page.$(btnSelector);
+          if (btn) {
+            await btn.click();
+            await delay(CONFIG.DELAY);
+            console.log('Clicked Email button');
+            break;
+          }
+        } catch (e) {}
+      }
+      
+      // Try selectors again after clicking
+      for (const selector of usernameSelectors) {
+        usernameInput = await page.$(selector);
+        if (usernameInput) {
+          console.log(`Found username field with selector: ${selector}`);
+          break;
+        }
+      }
     }
     
-    // Enter credentials
-    await page.type('input[name="id_username"]', CONFIG.TV_USERNAME, { delay: 50 });
-    await page.type('input[name="id_password"]', CONFIG.TV_PASSWORD, { delay: 50 });
-    
-    // Click sign in
-    await page.click('button[type="submit"]');
-    await delay(CONFIG.DELAY * 2);
-    
-    // Check if logged in
-    const userMenu = await page.$('button[data-name="header-user-menu-button"]');
-    if (userMenu) {
-      isLoggedIn = true;
-      lastActivity = new Date();
-      console.log('✅ Logged into TradingView!');
-      return true;
+    if (!usernameInput) {
+      console.log('❌ Could not find username input field');
+      console.log('Page URL:', page.url());
+      return false;
     }
     
-    console.log('❌ Login failed - check credentials');
-    return false;
+    // Clear and type username
+    await usernameInput.click({ clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await usernameInput.type(CONFIG.TV_USERNAME, { delay: 50 });
+    console.log('✅ Entered username');
+    
+    // Find password field
+    const passwordSelectors = [
+      'input[name="password"]',
+      'input[name="id_password"]',
+      'input[type="password"]',
+      '#id_password',
+      '.tv-control-material-input__control[name="password"]'
+    ];
+    
+    let passwordInput = null;
+    for (const selector of passwordSelectors) {
+      passwordInput = await page.$(selector);
+      if (passwordInput) {
+        console.log(`Found password field with selector: ${selector}`);
+        break;
+      }
+    }
+    
+    if (!passwordInput) {
+      console.log('❌ Could not find password input field');
+      return false;
+    }
+    
+    // Clear and type password
+    await passwordInput.click({ clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await passwordInput.type(CONFIG.TV_PASSWORD, { delay: 50 });
+    console.log('✅ Entered password');
+    
+    // Find and click submit button
+    const submitSelectors = [
+      'button[type="submit"]',
+      'button[data-overflow-tooltip-text="Sign in"]',
+      'button:has-text("Sign in")',
+      '.tv-button--primary[type="submit"]',
+      'button.submitButton'
+    ];
+    
+    let submitBtn = null;
+    for (const selector of submitSelectors) {
+      submitBtn = await page.$(selector);
+      if (submitBtn) {
+        console.log(`Found submit button with selector: ${selector}`);
+        break;
+      }
+    }
+    
+    if (submitBtn) {
+      await submitBtn.click();
+    } else {
+      // Try pressing Enter
+      await page.keyboard.press('Enter');
+    }
+    
+    console.log('⏳ Waiting for login to complete...');
+    await delay(CONFIG.DELAY * 3);
+    
+    // Check if logged in by looking for user menu or profile elements
+    const loggedInSelectors = [
+      'button[data-name="header-user-menu-button"]',
+      '[data-name="user-menu"]',
+      '.tv-header__user-menu-button',
+      'button[aria-label="Open user menu"]'
+    ];
+    
+    for (const selector of loggedInSelectors) {
+      const userMenu = await page.$(selector);
+      if (userMenu) {
+        isLoggedIn = true;
+        lastActivity = new Date();
+        console.log('✅ Logged into TradingView!');
+        return true;
+      }
+    }
+    
+    // Check if we're still on signin page (login failed)
+    const currentUrl = page.url();
+    if (currentUrl.includes('signin')) {
+      console.log('❌ Still on signin page - login failed');
+      console.log('Possible reasons: wrong credentials, 2FA required, or CAPTCHA');
+      return false;
+    }
+    
+    // If we're redirected somewhere else, assume success
+    console.log('✅ Redirected to:', currentUrl);
+    isLoggedIn = true;
+    lastActivity = new Date();
+    return true;
     
   } catch (error) {
     console.error('Login error:', error.message);
