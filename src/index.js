@@ -39,6 +39,108 @@ let page = null;
 let isLoggedIn = false;
 let lastActivity = null;
 
+// Cookie storage path
+const COOKIES_PATH = '/tmp/tv-cookies.json';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOKIE MANAGEMENT - Save and Load Sessions
+// ═══════════════════════════════════════════════════════════════════════════
+
+const fs = require('fs');
+
+async function saveCookies() {
+  if (!page) return false;
+  try {
+    const cookies = await page.cookies();
+    fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+    console.log(`✅ Saved ${cookies.length} cookies`);
+    return true;
+  } catch (error) {
+    console.error('Error saving cookies:', error.message);
+    return false;
+  }
+}
+
+async function loadCookies() {
+  if (!page) return false;
+  try {
+    if (fs.existsSync(COOKIES_PATH)) {
+      const cookiesString = fs.readFileSync(COOKIES_PATH);
+      const cookies = JSON.parse(cookiesString);
+      if (cookies.length > 0) {
+        await page.setCookie(...cookies);
+        console.log(`✅ Loaded ${cookies.length} cookies`);
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error('Error loading cookies:', error.message);
+    return false;
+  }
+}
+
+async function setCookiesFromString(cookiesJson) {
+  if (!page) {
+    await initBrowser();
+  }
+  try {
+    const cookies = JSON.parse(cookiesJson);
+    // Navigate to TradingView first (required before setting cookies)
+    await page.goto('https://www.tradingview.com/', { waitUntil: 'networkidle2' });
+    await page.setCookie(...cookies);
+    fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+    console.log(`✅ Set ${cookies.length} cookies from input`);
+    
+    // Reload page to apply cookies
+    await page.reload({ waitUntil: 'networkidle2' });
+    
+    // Check if logged in
+    const loggedIn = await checkIfLoggedIn();
+    if (loggedIn) {
+      isLoggedIn = true;
+      lastActivity = new Date();
+      console.log('✅ Session restored from cookies!');
+    }
+    return loggedIn;
+  } catch (error) {
+    console.error('Error setting cookies:', error.message);
+    return false;
+  }
+}
+
+async function checkIfLoggedIn() {
+  if (!page) return false;
+  try {
+    // Check for logged-in indicators
+    const selectors = [
+      'button[data-name="header-user-menu-button"]',
+      '[data-name="user-menu"]',
+      '.tv-header__user-menu-button',
+      'button[aria-label="Open user menu"]'
+    ];
+    
+    for (const selector of selectors) {
+      const element = await page.$(selector);
+      if (element) {
+        console.log('✅ User is logged in');
+        return true;
+      }
+    }
+    
+    // Also check URL - if not on signin page, might be logged in
+    const url = page.url();
+    if (!url.includes('signin') && !url.includes('accounts')) {
+      // Try to access a protected page
+      return false;
+    }
+    
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AUTHENTICATION MIDDLEWARE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -601,10 +703,12 @@ app.get('/health', (req, res) => {
 
 // Status (requires auth)
 app.get('/status', authenticate, (req, res) => {
+  const hasCookies = fs.existsSync(COOKIES_PATH);
   res.json({
     browser: browser ? 'running' : 'stopped',
     loggedIn: isLoggedIn,
     lastActivity: lastActivity,
+    hasSavedCookies: hasCookies,
     config: {
       hasCredentials: !!(CONFIG.TV_USERNAME && CONFIG.TV_PASSWORD),
       webhookUrl: CONFIG.BOT_WEBHOOK_URL
@@ -612,10 +716,88 @@ app.get('/status', authenticate, (req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// COOKIE/SESSION MANAGEMENT ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Set cookies from JSON string (for restoring session)
+app.post('/tv/cookies', authenticate, async (req, res) => {
+  try {
+    const { cookies } = req.body;
+    if (!cookies) {
+      return res.status(400).json({ error: 'Cookies required in body' });
+    }
+    
+    const cookiesJson = typeof cookies === 'string' ? cookies : JSON.stringify(cookies);
+    const success = await setCookiesFromString(cookiesJson);
+    
+    res.json({ 
+      success, 
+      loggedIn: isLoggedIn,
+      message: success ? 'Session restored from cookies!' : 'Failed to restore session'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get current cookies (to save session)
+app.get('/tv/cookies', authenticate, async (req, res) => {
+  try {
+    if (!page) {
+      await initBrowser();
+      await page.goto('https://www.tradingview.com/', { waitUntil: 'networkidle2' });
+    }
+    
+    const cookies = await page.cookies();
+    res.json({ 
+      success: true, 
+      cookies,
+      count: cookies.length 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Restore session from saved cookies
+app.post('/tv/session/restore', authenticate, async (req, res) => {
+  try {
+    await initBrowser();
+    await page.goto('https://www.tradingview.com/', { waitUntil: 'networkidle2' });
+    
+    const loaded = await loadCookies();
+    if (loaded) {
+      await page.reload({ waitUntil: 'networkidle2' });
+      const loggedIn = await checkIfLoggedIn();
+      isLoggedIn = loggedIn;
+      if (loggedIn) {
+        lastActivity = new Date();
+      }
+      res.json({ 
+        success: loggedIn, 
+        loggedIn,
+        message: loggedIn ? 'Session restored!' : 'Cookies loaded but not logged in'
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        message: 'No saved cookies found. Use /tv/cookies POST to set cookies first.'
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Login
 app.post('/tv/login', authenticate, async (req, res) => {
   try {
     const success = await login();
+    if (success) {
+      // Save cookies after successful login
+      await saveCookies();
+    }
     res.json({ success, loggedIn: isLoggedIn });
   } catch (error) {
     res.status(500).json({ error: error.message });
